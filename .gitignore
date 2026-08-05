@@ -4,6 +4,11 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Build artifacts
+*.egg-info/
+build/
+dist/
+
 # file with confidential information that should not be pushed to the git
 examples/conf.py
 examples/cache

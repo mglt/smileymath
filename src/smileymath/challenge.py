@@ -7,8 +7,6 @@ from math import ceil
 #from ascii_fig import AsciiFig
 #import sys
 #import sys.stdout
-from inputimeout import inputimeout, TimeoutOccurred
-import pynput
 import smileymath.user_input
 import smileymath.ascii_fig
 

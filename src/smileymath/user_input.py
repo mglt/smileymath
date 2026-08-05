@@ -1,5 +1,8 @@
 from pynput import keyboard
 import signal
+import sys
+import termios
+import tty
 import time
 import datetime
 import logging
@@ -72,56 +75,63 @@ class UserInput:
     """ starts a keyboard listener and get user input """
     input_value = None
     self.input_key_list = []
-    listener = keyboard.Listener( on_press=self.on_press, 
-                                  on_release=self.on_release)
-    if self.timeout is None :
-      listener.start()
-      listener.join( )
-    else:
-      try:
-        with Timeout( self.timeout ):
-          listener.start()
-          listener.join( )
-      except Timeout.Timeout :
-        if keyboard.Key.enter not in self.input_key_list :
-          print("")
-#        pass
-    
-    listener.stop()
+
+    # Suppress terminal echo so typed keys don't leak to the shell
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+      tty.setraw(fd)
+      # Restore only echo/canonical mode but keep raw for pynput
+      new_settings = termios.tcgetattr(fd)
+      # Disable echo (ECHO) and canonical mode (ICANON) 
+      # but keep output processing (OPOST) for proper newlines
+      new_settings[3] = new_settings[3] & ~termios.ECHO & ~termios.ICANON
+      new_settings[1] = new_settings[1] | termios.OPOST
+      termios.tcsetattr(fd, termios.TCSADRAIN, new_settings)
+
+      listener = keyboard.Listener( on_press=self.on_press, 
+                                    on_release=self.on_release)
+      if self.timeout is None :
+        listener.start()
+        listener.wait()  # ensure the listener is ready before accepting keys
+        listener.join( )
+      else:
+        try:
+          with Timeout( self.timeout ):
+            listener.start()
+            listener.wait()  # ensure the listener is ready
+            listener.join( )
+        except Timeout.Timeout :
+          if keyboard.Key.enter not in self.input_key_list :
+            print("")
+      
+      listener.stop()
+    finally:
+      # Restore original terminal settings
+      termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+      # Flush any remaining input in the terminal buffer
+      termios.tcflush(fd, termios.TCIFLUSH)
+
     try: 
       input_value = self.format_input( self.get_input_string( ) )
-#      self.log.debug( "get_user_input", f"input_value ({type( input_value )}) : {input_value}" )
       self.log.debug( f"formatted input_value ({type( input_value )}) : {input_value}" )
     except Exception as e:
-#      pass
-#      print("")
       self.log.debug( f"Error while formating {type(e)}:{e}" )
-#      self.debug( "get_user_input", f"Error while formating {type(e)}:{e}" )
       
     return input_value
 
   def get_input_string( self ):
     """reads the input provided """
   
-#    self.debug( "get_input_string", f"self.input_key_list: {self.input_key_list}" )
     self.log.debug( f"input_key_list: {self.input_key_list}" )
     string = ""
     for k in self.input_key_list:
-      ## not all keys have a "char attribute"
-      try: 
-        ## we realized that the key 5 from the numeric pad was not
-        ## displayed correctly.
-        ## The bug has been reported below.
-        ## https://github.com/moses-palmer/pynput/issues/530
-        if k.vk == 65437 :
-          string += '5'
+      if k == keyboard.Key.space:
+        string += ' '
+      elif k == keyboard.Key.enter:
+        pass  # end of input marker, not part of the string
+      elif hasattr(k, 'char') and k.char is not None:
         string += k.char
-      ## AttributeError is for keys without 'char'
-      ## TypeError is for None
-      except (AttributeError, TypeError):
-        if k == keyboard.Key.space:
-          string += ' '
-#    self.debug( "get_input_string", f"string: {string.strip()}" )
     self.log.debug( f"input_string (from input_key_list): {string.strip()}" )
     return string.strip()
   
@@ -172,37 +182,36 @@ class UserInput:
     ## In our case the number '5' is not considered by the num pad and is hardly 
     ## consider on the main part of the keyboard. 
     self.log.debug( f"pressed_key: {key}" )
-    ## key representing a char
-    if hasattr( key, 'char'):
+    ## key representing a char — only store if it actually has content
+    if hasattr( key, 'char') and key.char is not None:
       self.input_key_list.append( key )
     ## non character keys
     else: 
       ## backspace removes the last key 
       if key == keyboard.Key.backspace:
-        if len( self.input_key_list ) > 1:
+        if len( self.input_key_list ) > 0:
           self.input_key_list.pop( -1 )
-      ## esc stops the listener, but only if the input format 
-      ## is appropriated 
+      ## space is a valid input character
+      elif key == keyboard.Key.space:
+        self.input_key_list.append( key )
+      ## end_of_input stops the listener, but only if the input format 
+      ## is appropriate 
       elif key == self.end_of_input :
         if self.check_format( self.get_input_string( ) ) is True:
-#          print( f" get_input_string:{self.get_input_string( )}" )
           self.input_key_list.append( key )
           # Stop listener
           return False 
         else:
           ## One problem is that when enter has been typed
-          ## the cursors goes to the next line, and there is no 
+          ## the cursor goes to the next line, and there is no 
           ## way for the end user to backspace.
           ## to make possible the end user to re-enter a response
           ## we re-initialize the self.input_key_list.
           ## 
           if self.end_of_input == keyboard.Key.enter:
             self.input_key_list = []
-      ## we record the key for future use, but we do not expect 
-      ## such key to be useful. 
-      ## It is removed in the get_input_string function
-      else:
-        self.input_key_list.append( key )
+      ## ignore other special keys (shift, ctrl, alt, etc.)
+      ## they don't contribute to the input string
   
   def on_release(self, key):
     """ actions performed on key released.

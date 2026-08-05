@@ -24,7 +24,6 @@ _KEY_BYTES = {
     b' ': Key.SPACE,
     b'\x7f': Key.BACKSPACE,  # typical backspace
     b'\x08': Key.BACKSPACE,  # alternate backspace
-    b'\x1b': Key.ESC,
 }
 
 
@@ -95,8 +94,9 @@ class UserInput:
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
     try:
-      # Put terminal in raw mode to read individual keystrokes
-      tty.setraw(fd)
+      # Put terminal in cbreak mode: character-at-a-time input, no echo,
+      # but output processing (OPOST) is preserved so \n works as expected.
+      tty.setcbreak(fd)
 
       if self.timeout is None:
         self._read_keys(fd)
@@ -106,7 +106,8 @@ class UserInput:
             self._read_keys(fd)
         except Timeout.Timeout:
           if Key.ENTER not in self.input_key_list:
-            print("")
+            sys.stdout.write("\n")
+            sys.stdout.flush()
     finally:
       # Restore original terminal settings
       termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
@@ -132,6 +133,19 @@ class UserInput:
       # Map byte to a key constant or a character
       key = _KEY_BYTES.get(byte)
       if key is None:
+        # Check for escape sequences (numpad, arrow keys, etc.)
+        if byte == b'\x1b':
+          result = self._read_escape_sequence(fd)
+          if result == '__STOP__':
+            break
+          elif result is not None:
+            self.input_key_list.append(result)
+            # Echo the character
+            sys.stdout.write(result)
+            sys.stdout.flush()
+            self.log.debug(f"pressed_key (escape seq): {result}")
+          # If result is None, it was an unrecognized sequence — ignore
+          continue
         # Regular character
         try:
           char = byte.decode('utf-8')
@@ -141,28 +155,108 @@ class UserInput:
         if ord(char) < 32:
           continue
         self.input_key_list.append(char)
+        # Echo the character
+        sys.stdout.write(char)
+        sys.stdout.flush()
         self.log.debug(f"pressed_key: {char}")
       else:
         self.log.debug(f"pressed_key: {key}")
         if not self._handle_special_key(key):
           break
 
+  def _read_escape_sequence(self, fd):
+    """Read and interpret an escape sequence. Returns a character, '__STOP__', or None."""
+    import select
+    # Check if more bytes are available (escape sequence vs standalone Escape)
+    r, _, _ = select.select([fd], [], [], 0.05)
+    if not r:
+      # Standalone Escape key
+      if self.end_of_input == Key.ESC:
+        if self.check_format(self.get_input_string()):
+          self.input_key_list.append(Key.ESC)
+          sys.stdout.write("\n")
+          sys.stdout.flush()
+          return '__STOP__'
+      return None
+
+    byte2 = os.read(fd, 1)
+
+    # ESC O <char> — numpad in application mode
+    if byte2 == b'O':
+      r, _, _ = select.select([fd], [], [], 0.05)
+      if not r:
+        return None
+      byte3 = os.read(fd, 1)
+      # Numpad digits in application mode (ESC O p through ESC O y)
+      numpad_app = {
+          b'p': '0', b'q': '1', b'r': '2', b's': '3', b't': '4',
+          b'u': '5', b'v': '6', b'w': '7', b'x': '8', b'y': '9',
+          b'M': None,  # numpad Enter — handle as Enter
+          b'X': '*', b'j': '*', b'k': '+', b'm': '-', b'n': '.', b'o': '/',
+      }
+      if byte3 in numpad_app:
+        result = numpad_app[byte3]
+        if result is None:
+          # Numpad Enter — treat as regular Enter
+          self._handle_special_key(Key.ENTER)
+        return result
+      return None
+
+    # ESC [ ... — CSI sequences (numpad in normal mode, arrows, etc.)
+    if byte2 == b'[':
+      seq = b''
+      while True:
+        r, _, _ = select.select([fd], [], [], 0.05)
+        if not r:
+          break
+        b = os.read(fd, 1)
+        seq += b
+        # CSI sequences end with a byte in range 0x40-0x7E
+        if b and b[0] >= 0x40 and b[0] <= 0x7E:
+          break
+
+      # Numpad digits in normal mode (e.g. ESC[2~ = Insert/0, etc.)
+      # These vary by terminal, common xterm numpad mappings:
+      numpad_csi = {
+          b'2~': '0',   # Insert (numpad 0)
+          b'4~': '.',   # End mapped to period sometimes
+          # Arrow keys — ignore (don't add to input)
+          b'A': None, b'B': None, b'C': None, b'D': None,
+          b'H': None, b'F': None,  # Home, End
+      }
+      if seq in numpad_csi:
+        return numpad_csi[seq]
+      return None
+
+    return None
+
   def _handle_special_key(self, key):
     """Handle a special key. Returns False to stop reading, True to continue."""
     if key == Key.BACKSPACE:
       if len(self.input_key_list) > 0:
         self.input_key_list.pop(-1)
+        # Erase last character on screen: move back, overwrite with space, move back
+        sys.stdout.write('\b \b')
+        sys.stdout.flush()
       return True
     elif key == Key.SPACE:
       self.input_key_list.append(Key.SPACE)
+      # Echo space
+      sys.stdout.write(' ')
+      sys.stdout.flush()
       return True
     elif key == self.end_of_input:
       if self.check_format(self.get_input_string()):
         self.input_key_list.append(key)
+        # Print newline since echo is disabled
+        sys.stdout.write("\n")
+        sys.stdout.flush()
         return False  # Stop reading
       else:
         # Invalid format — reset input so user can re-enter
         if self.end_of_input == Key.ENTER:
+          sys.stdout.write("\n")
+          sys.stdout.flush()
           self.input_key_list = []
         return True
     else:

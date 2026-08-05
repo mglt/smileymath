@@ -1,4 +1,3 @@
-import matplotlib.pyplot as plt
 from random import randint
 import smileymath.ascii_data.animals
 import smileymath.ascii_data.star_wars
@@ -63,12 +62,6 @@ class AsciiFig:
       except KeyError:
         meta[ 'score' ] = self.score_list[ -1 ] 
     return meta_list
-
-  def plot_size( self ):
-   size_list = [ meta[ 'size' ] for meta in self.meta_list ]
-   plt.hist( size_list, bins=25, density=False, alpha=0.6, color='b')
-   plt.show()
-
 
   def pick_fig( self, score):
     """ select randomly a figure that corresponds to the score. Score is between 0 and 100. 
